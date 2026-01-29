@@ -1,0 +1,748 @@
+substitutions:
+  name: m5cores3
+  friendly_name: M5CoreS3
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  platformio_options:
+    board_build.flash_mode: dio
+    board_build.arduino.memory_type: qio_opi
+    board_build.f_flash: 80000000L
+  
+  on_boot:
+    priority: 600
+    then:
+      - delay: 5s
+      # --- HARDWARE INIT ---
+      - switch.turn_on: touch_rst
+      - delay: 100ms
+      - script.execute: refresh_nad_status
+      - light.turn_on:
+          id: lcd_backlight
+          brightness: 80%
+
+esp32:
+  board: m5stack-cores3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+# --- TREIBER ---
+external_components:
+  - source:
+      type: git
+      url: https://github.com/m5stack/esphome-yaml
+    components: [ axp2101, aw9523b ]
+
+logger:
+  logs:
+    sensor: INFO
+    ft63x6: WARN
+
+api:
+  encryption:
+    key: !secret m5stack-core3se-nad_api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret m5stack-core3se-nad_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 2
+  include_internal: False
+
+# --- BUS SYSTEME ---
+i2c:
+  sda: GPIO12
+  scl: GPIO11
+  scan: true
+  id: bus_internal
+  frequency: 400kHz
+
+spi:
+  clk_pin: GPIO36
+  mosi_pin: GPIO37
+  id: spi_bus
+
+# --- POWER ---
+axp2101:
+  id: axp2101_pmu
+  i2c_id: bus_internal
+
+aw9523b:
+  - id: aw9523b_hub
+    i2c_id: bus_internal
+
+output:
+  - platform: axp2101
+    type: range
+    channel: DLDO1
+    id: lcd_backlight_output
+    min_voltage: 2600
+    max_voltage: 3300
+  - platform: axp2101
+    channel: ALDO1
+    voltage: 3300
+  - platform: axp2101
+    channel: ALDO2
+    voltage: 3300
+  - platform: axp2101
+    channel: ALDO3
+    voltage: 3300
+  - platform: axp2101
+    channel: ALDO4
+    voltage: 3300
+  - platform: axp2101
+    channel: BLDO1
+    voltage: 3300
+  - platform: axp2101
+    channel: BLDO2
+    voltage: 3300
+
+# --- UART ---
+uart:
+  id: uart_bus
+  tx_pin: GPIO6 
+  rx_pin: GPIO10
+  baud_rate: 115200
+  debug:
+    direction: RX
+    dummy_receiver: true
+    after:
+      delimiter: "\r"
+    sequence:
+      - lambda: |-
+          std::string str(bytes.begin(), bytes.end());
+          str.erase(std::remove(str.begin(), str.end(), '\r'), str.end());
+          str.erase(std::remove(str.begin(), str.end(), '\n'), str.end());
+          if (!str.empty()) {
+            id(uart_readline).publish_state(str);
+          }
+
+text_sensor:
+  - platform: template
+    id: active_source_safe
+    name: "Active Source Display"
+    internal: true
+
+  - platform: template
+    id: uart_readline
+    name: "NAD Response"
+    internal: false
+    on_value:
+      then:
+        - lambda: |-
+            std::string s = x;
+            if (s.find("Main.Source=") != std::string::npos) {
+               std::string src = s.substr(12);
+               std::transform(src.begin(), src.end(), src.begin(), ::toupper);
+               id(active_source_safe).publish_state(src);
+            }
+
+globals:
+  - id: screensaver_timer
+    type: int
+    initial_value: '60'
+  - id: touch_locked
+    type: bool
+    initial_value: 'false'
+  - id: source_menu_active
+    type: bool
+    initial_value: 'false'
+
+# --- LOGIK ---
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(lcd_backlight).remote_values.is_on()) {
+            if (id(screensaver_timer) > 0) {
+              id(screensaver_timer) -= 1;
+            } else {
+              auto call = id(lcd_backlight).turn_off();
+              call.perform();
+              id(source_menu_active) = false;
+            }
+          }
+
+script:
+  - id: refresh_nad_status
+    mode: queued
+    then:
+      - uart.write: "\rMain.Source?\r"
+      - delay: 150ms
+      - uart.write: "\rMain.Mute?\r"
+      - delay: 150ms
+      # HIER KORRIGIERT: Tape1 Befehl
+      - uart.write: "\rMain.Tape1?\r"
+      - delay: 150ms
+      - uart.write: "\rMain.SpeakerA?\r"
+      - delay: 150ms
+      - uart.write: "\rMain.SpeakerB?\r"
+      - delay: 150ms
+      - uart.write: "\rMain.Power?\r"
+
+  - id: unlock_touch_logic
+    mode: restart
+    then:
+      - delay: 500ms 
+      - globals.set:
+          id: touch_locked
+          value: 'false'
+
+  - id: close_menu_delayed
+    mode: restart
+    then:
+      - delay: 300ms
+      - globals.set:
+          id: source_menu_active
+          value: 'false'
+
+light:
+  - platform: monochromatic
+    id: lcd_backlight
+    name: "LCD Backlight"
+    output: lcd_backlight_output
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 0.2s
+    on_turn_on:
+      - lambda: id(screensaver_timer) = 60;
+
+# --- UI DESIGN & FONTS ---
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 18
+  - file: "gfonts://Roboto"
+    id: font_medium
+    size: 24
+  - file: "gfonts://Roboto"
+    id: font_large
+    size: 28 
+  - file: "gfonts://Roboto"
+    id: font_huge
+    size: 60
+
+color:
+  - id: col_white
+    hex: 'FFFFFF'
+  - id: col_black
+    hex: '000000'
+  - id: col_bg
+    hex: '181818'
+  - id: col_btn_base
+    hex: '383838'
+  - id: col_btn_light
+    hex: '606060'
+  - id: col_btn_shadow
+    hex: '101010'
+  - id: col_active_bg
+    hex: '004488'
+  - id: col_text_active
+    hex: '00CCFF'
+  - id: col_alert
+    hex: 'FF4444'
+  - id: col_green
+    hex: '00FF00'
+
+# --- DISPLAY ---
+display:
+  - platform: mipi_spi
+    model: M5CORE
+    dc_pin: GPIO35
+    reset_pin:
+      aw9523b: aw9523b_hub
+      number: 9
+    cs_pin: GPIO3
+    data_rate: 40MHz
+    id: m5cores3_lcd
+    invert_colors: true
+    auto_clear_enabled: false
+    update_interval: 100ms 
+    dimensions:
+      height: 240
+      width: 320
+    lambda: |-
+      if (!id(lcd_backlight).remote_values.is_on()) {
+         it.fill(id(col_black));
+         return;
+      }
+
+      it.fill(id(col_bg));
+      
+      // HEADER
+      it.filled_rectangle(0, 0, 320, 30, id(col_black));
+      it.print(10, 15, id(font_small), id(col_white), TextAlign::CENTER_LEFT, "NAD C355");
+      
+      // GRAFISCHE AKKU ANZEIGE
+      if (id(battery_voltage).has_state()) {
+        float v = id(battery_voltage).state;
+        bool is_charging = id(battery_charging).state;
+        float pct = (v - 3.4) / (4.15 - 3.4);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+
+        Color bat_col = id(col_white);
+        if (is_charging) bat_col = id(col_green);
+        else if (pct < 0.2) bat_col = id(col_alert);
+
+        int bx = 280, by = 8, bw = 30, bh = 14;
+        it.rectangle(bx, by, bw, bh, bat_col);
+        it.filled_rectangle(bx + bw, by + 3, 3, bh - 6, bat_col);
+        int fill_w = (int)((bw - 4) * pct);
+        if (fill_w > 0) it.filled_rectangle(bx + 2, by + 2, fill_w, bh - 4, bat_col);
+
+        if (is_charging) {
+           it.line(bx+12, by-2, bx+18, by+7, id(col_white));
+           it.line(bx+18, by+7, bx+12, by+7, id(col_white));
+           it.line(bx+12, by+7, bx+18, by+16, id(col_white));
+        }
+      }
+
+      // --- ROW 1: POWER | SOURCE | MUTE ---
+      int r1_y = 40;
+      int r1_h = 60;
+      
+      auto draw_r1_btn = [&](int x, int w, const char* label, bool active, bool is_alert) {
+          Color bg_col = id(col_btn_base);
+          if (active) bg_col = is_alert ? id(col_alert) : id(col_active_bg);
+          
+          it.filled_rectangle(x, r1_y, w, r1_h, bg_col);
+          
+          Color top = active ? id(col_btn_shadow) : id(col_btn_light);
+          Color bot = active ? id(col_btn_light) : id(col_btn_shadow);
+          
+          it.line(x, r1_y, x+w, r1_y, top);
+          it.line(x, r1_y, x, r1_y+r1_h, top);
+          it.line(x, r1_y+r1_h, x+w, r1_y+r1_h, bot);
+          it.line(x+w, r1_y, x+w, r1_y+r1_h, bot);
+          it.print(x+(w/2), r1_y+(r1_h/2), id(font_small), id(col_white), TextAlign::CENTER, label);
+      };
+
+      // 1. POWER (Links)
+      draw_r1_btn(10, 70, "PWR", id(nad_power).state, true);
+
+      // 2. MUTE (Rechts)
+      draw_r1_btn(240, 70, "MUTE", id(nad_mute).state, true);
+
+      // 3. SOURCE (Mitte)
+      int sx = 90, sw = 140;
+      it.filled_rectangle(sx, r1_y, sw, r1_h, id(col_btn_base));
+      it.line(sx, r1_y, sx+sw, r1_y, id(col_btn_light));
+      it.line(sx, r1_y, sx, r1_y+r1_h, id(col_btn_light));
+      it.line(sx, r1_y+r1_h, sx+sw, r1_y+r1_h, id(col_btn_shadow));
+      it.line(sx+sw, r1_y, sx+sw, r1_y+r1_h, id(col_btn_shadow));
+
+      it.print(sx+(sw/2), r1_y+3, id(font_small), id(col_white), TextAlign::TOP_CENTER, "SOURCE");
+      
+      if (id(nad_power).state) {
+         if (id(active_source_safe).has_state()) {
+            it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_text_active), TextAlign::BOTTOM_CENTER, id(active_source_safe).state.c_str());
+         } else {
+            it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_white), TextAlign::BOTTOM_CENTER, "...");
+         }
+      } else {
+         it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_alert), TextAlign::BOTTOM_CENTER, "OFF");
+      }
+
+
+      // --- ROW 2: VOLUME ---
+      int r2_y = 110;
+      int r2_h = 75;
+      
+      // Vol -
+      int v1x=10, v1w=145;
+      it.filled_rectangle(v1x, r2_y, v1w, r2_h, id(col_btn_base));
+      it.line(v1x, r2_y, v1x+v1w, r2_y, id(col_btn_light));
+      it.line(v1x, r2_y, v1x, r2_y+r2_h, id(col_btn_light));
+      it.line(v1x, r2_y+r2_h, v1x+v1w, r2_y+r2_h, id(col_btn_shadow));
+      it.line(v1x+v1w, r2_y, v1x+v1w, r2_y+r2_h, id(col_btn_shadow));
+      it.print(v1x+(v1w/2), r2_y+(r2_h/2), id(font_huge), id(col_white), TextAlign::CENTER, "-");
+
+      // Vol +
+      int v2x=165, v2w=145;
+      it.filled_rectangle(v2x, r2_y, v2w, r2_h, id(col_btn_base));
+      it.line(v2x, r2_y, v2x+v2w, r2_y, id(col_btn_light));
+      it.line(v2x, r2_y, v2x, r2_y+r2_h, id(col_btn_light));
+      it.line(v2x, r2_y+r2_h, v2x+v2w, r2_y+r2_h, id(col_btn_shadow));
+      it.line(v2x+v2w, r2_y, v2x+v2w, r2_y+r2_h, id(col_btn_shadow));
+      it.print(v2x+(v2w/2), r2_y+(r2_h/2), id(font_huge), id(col_white), TextAlign::CENTER, "+");
+
+
+      // --- ROW 3: FOOTER ---
+      int by=195, bw=96, bh=40, bg=6;
+      int bx = 10;
+
+      auto draw_sub_btn = [&](int x, int w, const char* label, bool active) {
+          Color bg_col = active ? id(col_active_bg) : id(col_btn_base);
+          it.filled_rectangle(x, by, w, bh, bg_col);
+          
+          Color top = active ? id(col_btn_shadow) : id(col_btn_light);
+          Color bot = active ? id(col_btn_light) : id(col_btn_shadow);
+          
+          it.line(x, by, x+w, by, top);
+          it.line(x, by, x, by+bh, top);
+          it.line(x, by+bh, x+w, by+bh, bot);
+          it.line(x+w, by, x+w, by+bh, bot);
+          it.print(x+(w/2), by+(bh/2), id(font_small), id(col_white), TextAlign::CENTER, label);
+      };
+
+      // 1. SPK A
+      draw_sub_btn(bx, bw, "SPK A", id(nad_spk_a).state);
+      bx += bw + bg;
+      
+      // 2. SPK B
+      draw_sub_btn(bx, bw, "SPK B", id(nad_spk_b).state);
+      bx += bw + bg;
+      
+      // 3. TAPE MONITOR
+      draw_sub_btn(bx, bw, "TAPE", id(nad_tape_mon).state);
+
+
+      // OVERLAY MENÜ
+      if (id(source_menu_active)) {
+         it.filled_rectangle(0, 30, 320, 210, id(col_black)); 
+         it.line(0, 30, 320, 30, id(col_btn_light));
+
+         int m_y = 35; 
+         int m_h = 45;
+         int m_w = 150;
+         
+         const char* options[] = {"TUNER", "CD", "VIDEO", "AUX", "DISC", "TAPE2", "IPOD", "CANCEL"};
+         
+         auto draw_menu_item = [&](int idx, const char* txt) {
+             int row = idx / 2;
+             int col = idx % 2;
+             int pos_x = 5 + (col * (m_w + 10));
+             int pos_y = m_y + (row * (m_h + 5));
+             
+             bool is_current = (id(active_source_safe).state == txt);
+             if (strcmp(txt, "CANCEL") == 0) is_current = false; 
+
+             Color bg = is_current ? id(col_active_bg) : id(col_btn_base);
+             if (strcmp(txt, "CANCEL") == 0) bg = id(col_alert);
+
+             it.filled_rectangle(pos_x, pos_y, m_w, m_h, bg);
+             
+             it.line(pos_x, pos_y, pos_x+m_w, pos_y, id(col_btn_light));
+             it.line(pos_x, pos_y, pos_x, pos_y+m_h, id(col_btn_light));
+             it.line(pos_x, pos_y+m_h, pos_x+m_w, pos_y+m_h, id(col_btn_shadow));
+             it.line(pos_x+m_w, pos_y, pos_x+m_w, pos_y+m_h, id(col_btn_shadow));
+
+             it.print(pos_x+(m_w/2), pos_y+(m_h/2), id(font_medium), id(col_white), TextAlign::CENTER, txt);
+         };
+
+         for(int i=0; i<8; i++) {
+            draw_menu_item(i, options[i]);
+         }
+      }
+
+# --- TOUCHSCREEN ---
+touchscreen:
+  - platform: ft63x6
+    id: touch_dev
+    i2c_id: bus_internal
+    reset_pin:
+      aw9523b: aw9523b_hub
+      number: 0
+    transform:
+      swap_xy: false
+    on_touch:
+      - lambda: |-
+          id(screensaver_timer) = 60;
+          
+          if (!id(lcd_backlight).remote_values.is_on()) {
+             id(touch_locked) = true;
+             auto call = id(lcd_backlight).turn_on();
+             call.perform();
+             id(unlock_touch_logic).execute();
+             return;
+          }
+          
+          if (id(touch_locked)) return;
+
+          if (id(source_menu_active)) {
+             auto t = touch; 
+             
+             if (t.y < 35) return; 
+
+             int row = (t.y - 35) / 50; 
+             int col = -1;
+             if (t.x > 5 && t.x < 155) col = 0;
+             if (t.x > 165 && t.x < 315) col = 1;
+
+             if (row >= 0 && row < 4 && col != -1) {
+                int idx = (row * 2) + col;
+                const char* cmds[] = {"TUNER", "CD", "VIDEO", "AUX", "DISC", "TAPE2", "IPOD", "CANCEL"};
+                
+                if (idx < 8) {
+                   if (idx == 7) { 
+                      // CANCEL
+                   } else {
+                      std::string cmd = "\rMain.Source=";
+                      cmd += cmds[idx];
+                      cmd += "\r";
+                      id(uart_bus).write_str(cmd.c_str());
+                      id(active_source_safe).publish_state(cmds[idx]);
+                   }
+                   id(close_menu_delayed).execute();
+                }
+             }
+          }
+
+# --- SENSORS ---
+sensor:
+  - platform: axp2101
+    id: axp2101_id
+    battery_voltage:
+      name: "Battery Voltage"
+      id: battery_voltage
+    battery_level:
+      name: "Battery Level"
+      id: battery_level
+    battery_charging:
+      name: "Battery Charging"
+      id: battery_charging
+    update_interval: 10s
+
+switch:
+  - platform: gpio
+    name: "Touch Reset (AW Pin 10)"
+    pin:
+      aw9523b: aw9523b_hub
+      number: 10 
+      mode: OUTPUT
+    id: touch_rst
+    internal: true
+    restore_mode: ALWAYS_ON 
+
+  - platform: gpio
+    name: "AW Pin 1"
+    pin:
+      aw9523b: aw9523b_hub
+      number: 1
+      mode: OUTPUT
+    id: sw_aw_1
+    internal: true
+    restore_mode: ALWAYS_ON
+  
+  - platform: gpio
+    name: "AW Pin 15"
+    pin:
+      aw9523b: aw9523b_hub
+      number: 15
+      mode: OUTPUT
+    id: sw_aw_15
+    internal: true
+    restore_mode: ALWAYS_ON
+
+  - platform: template
+    name: "Power"
+    id: nad_power
+    lambda: |-
+      if (id(uart_readline).state.find("Main.Power=On") != std::string::npos) return true;
+      if (id(uart_readline).state.find("Main.Power=Off") != std::string::npos) return false;
+      return {};
+    turn_on_action:
+      - uart.write: "\rMain.Power=On\r"
+      - delay: 3s 
+      - script.execute: refresh_nad_status
+    turn_off_action:
+      - uart.write: "\rMain.Power=Off\r"
+
+  - platform: template
+    name: "Mute"
+    id: nad_mute
+    lambda: |-
+      std::string s = id(uart_readline).state;
+      if (s.find("Main.Mute=On") != std::string::npos) return true;
+      if (s.find("Main.Mute=Off") != std::string::npos) return false;
+      return {};
+    turn_on_action:
+      - uart.write: "\rMain.Mute=On\r"
+    turn_off_action:
+      - uart.write: "\rMain.Mute=Off\r"
+
+  # TAPE MONITOR (KORRIGIERT AUF "Main.Tape1")
+  - platform: template
+    name: "Tape Monitor"
+    id: nad_tape_mon
+    lambda: |-
+      std::string s = id(uart_readline).state;
+      if (s.find("Main.Tape1=On") != std::string::npos) return true;
+      if (s.find("Main.Tape1=Off") != std::string::npos) return false;
+      return {};
+    turn_on_action:
+      - uart.write: "\rMain.Tape1=On\r"
+    turn_off_action:
+      - uart.write: "\rMain.Tape1=Off\r"
+
+  - platform: template
+    name: "Speaker A"
+    id: nad_spk_a
+    lambda: |-
+      std::string s = id(uart_readline).state;
+      if (s.find("Main.SpeakerA=On") != std::string::npos || s.find("Main.Speakera=On") != std::string::npos) return true;
+      if (s.find("Main.SpeakerA=Off") != std::string::npos || s.find("Main.Speakera=Off") != std::string::npos) return false;
+      return {};
+    turn_on_action:
+      - uart.write: "\rMain.SpeakerA=On\r"
+    turn_off_action:
+      - uart.write: "\rMain.SpeakerA=Off\r"
+
+  - platform: template
+    name: "Speaker B"
+    id: nad_spk_b
+    lambda: |-
+      std::string s = id(uart_readline).state;
+      if (s.find("Main.SpeakerB=On") != std::string::npos || s.find("Main.Speakerb=On") != std::string::npos) return true;
+      if (s.find("Main.SpeakerB=Off") != std::string::npos || s.find("Main.Speakerb=Off") != std::string::npos) return false;
+      return {};
+    turn_on_action:
+      - uart.write: "\rMain.SpeakerB=On\r"
+    turn_off_action:
+      - uart.write: "\rMain.SpeakerB=Off\r"
+
+button:
+  - platform: template
+    name: "Volume Up"
+    id: btn_vol_up
+    icon: "mdi:volume-plus"
+    on_press:
+      - uart.write: "\rMain.Volume+\r"
+  - platform: template
+    name: "Volume Down"
+    id: btn_vol_down
+    icon: "mdi:volume-minus"
+    on_press:
+      - uart.write: "\rMain.Volume-\r"
+
+select:
+  - platform: template
+    name: "Source Select"
+    id: source_select
+    icon: "mdi:import"
+    options:
+      - "TUNER"
+      - "CD"
+      - "VIDEO"
+      - "AUX"
+      - "DISC"
+      - "TAPE2"
+      - "IPOD"
+    set_action: []
+    lambda: |-
+      if (id(active_source_safe).has_state()) {
+         return id(active_source_safe).state;
+      }
+      return {};
+
+# --- TOUCH ZONEN (LAYOUT 2) ---
+binary_sensor:
+  - platform: status
+    name: "API Status"
+
+  # --- ROW 1 ---
+  # PWR: 0 - 85
+  - platform: touchscreen
+    name: "Touch Power"
+    touchscreen_id: touch_dev
+    x_min: 0
+    x_max: 85
+    y_min: 30
+    y_max: 110
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_power).toggle();
+
+  # SOURCE: 85 - 235
+  - platform: touchscreen
+    name: "Touch Source"
+    touchscreen_id: touch_dev
+    x_min: 85
+    x_max: 235
+    y_min: 30
+    y_max: 110
+    on_press:
+      - lambda: |-
+          if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) {
+             id(source_menu_active) = true; 
+          }
+
+  # MUTE: 235 - 320
+  - platform: touchscreen
+    name: "Touch Mute"
+    touchscreen_id: touch_dev
+    x_min: 235
+    x_max: 320
+    y_min: 30
+    y_max: 110
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_mute).toggle();
+
+  # --- ROW 2 (VOLUME) ---
+  # VOL -: 0 - 160
+  - platform: touchscreen
+    name: "Touch Vol Down"
+    touchscreen_id: touch_dev
+    x_min: 0
+    x_max: 160
+    y_min: 110
+    y_max: 190
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(btn_vol_down).press();
+
+  # VOL +: 160 - 320
+  - platform: touchscreen
+    name: "Touch Vol Up"
+    touchscreen_id: touch_dev
+    x_min: 160
+    x_max: 320
+    y_min: 110
+    y_max: 190
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(btn_vol_up).press();
+
+  # --- ROW 3 ---
+  # 1. SPK A: 0 - 105
+  - platform: touchscreen
+    name: "Touch Spk A"
+    touchscreen_id: touch_dev
+    x_min: 0
+    x_max: 105
+    y_min: 190
+    y_max: 240
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_spk_a).toggle();
+
+  # 2. SPK B: 105 - 210
+  - platform: touchscreen
+    name: "Touch Spk B"
+    touchscreen_id: touch_dev
+    x_min: 105
+    x_max: 210
+    y_min: 190
+    y_max: 240
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_spk_b).toggle();
+
+  # 3. TAPE MON: 210 - 320
+  - platform: touchscreen
+    name: "Touch Tape Mon"
+    touchscreen_id: touch_dev
+    x_min: 210
+    x_max: 320
+    y_min: 190
+    y_max: 240
+    on_press:
+      - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_tape_mon).toggle();
