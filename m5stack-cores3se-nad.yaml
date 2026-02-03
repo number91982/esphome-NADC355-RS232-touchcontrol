@@ -111,6 +111,35 @@ output:
     channel: BLDO2
     voltage: 3300
 
+# --- GLOBALS (Zustandsspeicher) ---
+globals:
+  - id: screensaver_timer
+    type: int
+    initial_value: '60'
+  - id: touch_locked
+    type: bool
+    initial_value: 'false'
+  - id: source_menu_active
+    type: bool
+    initial_value: 'false'
+  
+  # NAD Zustände
+  - id: g_nad_power
+    type: bool
+    initial_value: 'false'
+  - id: g_nad_mute
+    type: bool
+    initial_value: 'false'
+  - id: g_nad_spk_a
+    type: bool
+    initial_value: 'false'
+  - id: g_nad_spk_b
+    type: bool
+    initial_value: 'false'
+  - id: g_nad_tape
+    type: bool
+    initial_value: 'false'
+
 # --- UART ---
 uart:
   id: uart_bus
@@ -127,8 +156,30 @@ uart:
           std::string str(bytes.begin(), bytes.end());
           str.erase(std::remove(str.begin(), str.end(), '\r'), str.end());
           str.erase(std::remove(str.begin(), str.end(), '\n'), str.end());
-          if (!str.empty()) {
-            id(uart_readline).publish_state(str);
+          
+          if (str.empty()) return;
+
+          // Parsing direkt hier in Globals
+          if (str.find("Main.Power=On") != std::string::npos) id(g_nad_power) = true;
+          else if (str.find("Main.Power=Off") != std::string::npos) id(g_nad_power) = false;
+          
+          else if (str.find("Main.Mute=On") != std::string::npos) id(g_nad_mute) = true;
+          else if (str.find("Main.Mute=Off") != std::string::npos) id(g_nad_mute) = false;
+          
+          else if (str.find("Main.SpeakerA=On") != std::string::npos) id(g_nad_spk_a) = true;
+          else if (str.find("Main.SpeakerA=Off") != std::string::npos) id(g_nad_spk_a) = false;
+          
+          else if (str.find("Main.SpeakerB=On") != std::string::npos) id(g_nad_spk_b) = true;
+          else if (str.find("Main.SpeakerB=Off") != std::string::npos) id(g_nad_spk_b) = false;
+          
+          else if (str.find("Main.Tape1=On") != std::string::npos) id(g_nad_tape) = true;
+          else if (str.find("Main.Tape1=Off") != std::string::npos) id(g_nad_tape) = false;
+
+          else if (str.find("Main.Source=") != std::string::npos) {
+             std::string src = str.substr(12);
+             std::transform(src.begin(), src.end(), src.begin(), ::toupper);
+             id(active_source_safe).publish_state(src);
+             id(source_select).publish_state(src);
           }
 
 text_sensor:
@@ -136,31 +187,6 @@ text_sensor:
     id: active_source_safe
     name: "Active Source Display"
     internal: true
-
-  - platform: template
-    id: uart_readline
-    name: "NAD Response"
-    internal: false
-    on_value:
-      then:
-        - lambda: |-
-            std::string s = x;
-            if (s.find("Main.Source=") != std::string::npos) {
-               std::string src = s.substr(12);
-               std::transform(src.begin(), src.end(), src.begin(), ::toupper);
-               id(active_source_safe).publish_state(src);
-            }
-
-globals:
-  - id: screensaver_timer
-    type: int
-    initial_value: '60'
-  - id: touch_locked
-    type: bool
-    initial_value: 'false'
-  - id: source_menu_active
-    type: bool
-    initial_value: 'false'
 
 # --- LOGIK ---
 interval:
@@ -185,7 +211,6 @@ script:
       - delay: 150ms
       - uart.write: "\rMain.Mute?\r"
       - delay: 150ms
-      # HIER KORRIGIERT: Tape1 Befehl
       - uart.write: "\rMain.Tape1?\r"
       - delay: 150ms
       - uart.write: "\rMain.SpeakerA?\r"
@@ -270,7 +295,7 @@ display:
     id: m5cores3_lcd
     invert_colors: true
     auto_clear_enabled: false
-    update_interval: 100ms 
+    update_interval: 250ms
     dimensions:
       height: 240
       width: 320
@@ -330,13 +355,10 @@ display:
           it.print(x+(w/2), r1_y+(r1_h/2), id(font_small), id(col_white), TextAlign::CENTER, label);
       };
 
-      // 1. POWER (Links)
-      draw_r1_btn(10, 70, "PWR", id(nad_power).state, true);
+      draw_r1_btn(10, 70, "PWR", id(g_nad_power), true);
+      draw_r1_btn(240, 70, "MUTE", id(g_nad_mute), true);
 
-      // 2. MUTE (Rechts)
-      draw_r1_btn(240, 70, "MUTE", id(nad_mute).state, true);
-
-      // 3. SOURCE (Mitte)
+      // SOURCE (Mitte)
       int sx = 90, sw = 140;
       it.filled_rectangle(sx, r1_y, sw, r1_h, id(col_btn_base));
       it.line(sx, r1_y, sx+sw, r1_y, id(col_btn_light));
@@ -346,7 +368,7 @@ display:
 
       it.print(sx+(sw/2), r1_y+3, id(font_small), id(col_white), TextAlign::TOP_CENTER, "SOURCE");
       
-      if (id(nad_power).state) {
+      if (id(g_nad_power)) {
          if (id(active_source_safe).has_state()) {
             it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_text_active), TextAlign::BOTTOM_CENTER, id(active_source_safe).state.c_str());
          } else {
@@ -356,12 +378,10 @@ display:
          it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_alert), TextAlign::BOTTOM_CENTER, "OFF");
       }
 
-
       // --- ROW 2: VOLUME ---
       int r2_y = 110;
       int r2_h = 75;
       
-      // Vol -
       int v1x=10, v1w=145;
       it.filled_rectangle(v1x, r2_y, v1w, r2_h, id(col_btn_base));
       it.line(v1x, r2_y, v1x+v1w, r2_y, id(col_btn_light));
@@ -370,7 +390,6 @@ display:
       it.line(v1x+v1w, r2_y, v1x+v1w, r2_y+r2_h, id(col_btn_shadow));
       it.print(v1x+(v1w/2), r2_y+(r2_h/2), id(font_huge), id(col_white), TextAlign::CENTER, "-");
 
-      // Vol +
       int v2x=165, v2w=145;
       it.filled_rectangle(v2x, r2_y, v2w, r2_h, id(col_btn_base));
       it.line(v2x, r2_y, v2x+v2w, r2_y, id(col_btn_light));
@@ -378,7 +397,6 @@ display:
       it.line(v2x, r2_y+r2_h, v2x+v2w, r2_y+r2_h, id(col_btn_shadow));
       it.line(v2x+v2w, r2_y, v2x+v2w, r2_y+r2_h, id(col_btn_shadow));
       it.print(v2x+(v2w/2), r2_y+(r2_h/2), id(font_huge), id(col_white), TextAlign::CENTER, "+");
-
 
       // --- ROW 3: FOOTER ---
       int by=195, bw=96, bh=40, bg=6;
@@ -398,17 +416,11 @@ display:
           it.print(x+(w/2), by+(bh/2), id(font_small), id(col_white), TextAlign::CENTER, label);
       };
 
-      // 1. SPK A
-      draw_sub_btn(bx, bw, "SPK A", id(nad_spk_a).state);
+      draw_sub_btn(bx, bw, "SPK A", id(g_nad_spk_a));
       bx += bw + bg;
-      
-      // 2. SPK B
-      draw_sub_btn(bx, bw, "SPK B", id(nad_spk_b).state);
+      draw_sub_btn(bx, bw, "SPK B", id(g_nad_spk_b));
       bx += bw + bg;
-      
-      // 3. TAPE MONITOR
-      draw_sub_btn(bx, bw, "TAPE", id(nad_tape_mon).state);
-
+      draw_sub_btn(bx, bw, "TAPE", id(g_nad_tape));
 
       // OVERLAY MENÜ
       if (id(source_menu_active)) {
@@ -448,7 +460,8 @@ display:
          }
       }
 
-# --- TOUCHSCREEN ---
+# --- TOUCHSCREEN TREIBER & LOGIK ---
+# WICHTIG: Das hier hatte gefehlt!
 touchscreen:
   - platform: ft63x6
     id: touch_dev
@@ -462,6 +475,7 @@ touchscreen:
       - lambda: |-
           id(screensaver_timer) = 60;
           
+          // Safe Wake Up
           if (!id(lcd_backlight).remote_values.is_on()) {
              id(touch_locked) = true;
              auto call = id(lcd_backlight).turn_on();
@@ -472,6 +486,7 @@ touchscreen:
           
           if (id(touch_locked)) return;
 
+          // Overlay Menü Klick-Logik
           if (id(source_menu_active)) {
              auto t = touch; 
              
@@ -516,6 +531,7 @@ sensor:
       id: battery_charging
     update_interval: 10s
 
+# --- SWITCHES (Lesen Globals) ---
 switch:
   - platform: gpio
     name: "Touch Reset (AW Pin 10)"
@@ -550,10 +566,7 @@ switch:
   - platform: template
     name: "Power"
     id: nad_power
-    lambda: |-
-      if (id(uart_readline).state.find("Main.Power=On") != std::string::npos) return true;
-      if (id(uart_readline).state.find("Main.Power=Off") != std::string::npos) return false;
-      return {};
+    lambda: return id(g_nad_power);
     turn_on_action:
       - uart.write: "\rMain.Power=On\r"
       - delay: 3s 
@@ -564,25 +577,16 @@ switch:
   - platform: template
     name: "Mute"
     id: nad_mute
-    lambda: |-
-      std::string s = id(uart_readline).state;
-      if (s.find("Main.Mute=On") != std::string::npos) return true;
-      if (s.find("Main.Mute=Off") != std::string::npos) return false;
-      return {};
+    lambda: return id(g_nad_mute);
     turn_on_action:
       - uart.write: "\rMain.Mute=On\r"
     turn_off_action:
       - uart.write: "\rMain.Mute=Off\r"
 
-  # TAPE MONITOR (KORRIGIERT AUF "Main.Tape1")
   - platform: template
     name: "Tape Monitor"
     id: nad_tape_mon
-    lambda: |-
-      std::string s = id(uart_readline).state;
-      if (s.find("Main.Tape1=On") != std::string::npos) return true;
-      if (s.find("Main.Tape1=Off") != std::string::npos) return false;
-      return {};
+    lambda: return id(g_nad_tape);
     turn_on_action:
       - uart.write: "\rMain.Tape1=On\r"
     turn_off_action:
@@ -591,11 +595,7 @@ switch:
   - platform: template
     name: "Speaker A"
     id: nad_spk_a
-    lambda: |-
-      std::string s = id(uart_readline).state;
-      if (s.find("Main.SpeakerA=On") != std::string::npos || s.find("Main.Speakera=On") != std::string::npos) return true;
-      if (s.find("Main.SpeakerA=Off") != std::string::npos || s.find("Main.Speakera=Off") != std::string::npos) return false;
-      return {};
+    lambda: return id(g_nad_spk_a);
     turn_on_action:
       - uart.write: "\rMain.SpeakerA=On\r"
     turn_off_action:
@@ -604,11 +604,7 @@ switch:
   - platform: template
     name: "Speaker B"
     id: nad_spk_b
-    lambda: |-
-      std::string s = id(uart_readline).state;
-      if (s.find("Main.SpeakerB=On") != std::string::npos || s.find("Main.Speakerb=On") != std::string::npos) return true;
-      if (s.find("Main.SpeakerB=Off") != std::string::npos || s.find("Main.Speakerb=Off") != std::string::npos) return false;
-      return {};
+    lambda: return id(g_nad_spk_b);
     turn_on_action:
       - uart.write: "\rMain.SpeakerB=On\r"
     turn_off_action:
@@ -641,7 +637,10 @@ select:
       - "DISC"
       - "TAPE2"
       - "IPOD"
-    set_action: []
+    set_action:
+      - lambda: |-
+          std::string cmd = "\rMain.Source=" + x + "\r";
+          id(uart_bus).write_str(cmd.c_str());
     lambda: |-
       if (id(active_source_safe).has_state()) {
          return id(active_source_safe).state;
