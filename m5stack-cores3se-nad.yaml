@@ -71,6 +71,8 @@ i2c:
   id: bus_internal
   frequency: 400kHz
 
+# WICHTIG: Original M5Stack CoreS3 Belegung lassen!
+# Nicht ändern, da fest verdrahtet.
 spi:
   clk_pin: GPIO36
   mosi_pin: GPIO37
@@ -111,7 +113,7 @@ output:
     channel: BLDO2
     voltage: 3300
 
-# --- GLOBALS (Zustandsspeicher) ---
+# --- GLOBALS ---
 globals:
   - id: screensaver_timer
     type: int
@@ -140,7 +142,7 @@ globals:
     type: bool
     initial_value: 'false'
 
-# --- UART PARSER (Clean & Robust) ---
+# --- UART ---
 uart:
   id: uart_bus
   tx_pin: GPIO6 
@@ -185,7 +187,7 @@ uart:
              
              if (!src.empty()) {
                  id(active_source_safe).publish_state(src);
-                 // BEREINIGT: Kein redundanter Check mehr
+                 // Direkter Aufruf ohne redundanten Check
                  id(source_select).publish_state(src);
              }
           }
@@ -203,7 +205,8 @@ interval:
       - lambda: |-
           if (id(lcd_backlight).remote_values.is_on()) {
             if (id(screensaver_timer) > 0) {
-              id(screensaver_timer) -= 1;
+              // OPTIMIERUNG: std::max verhindert Unterlauf (ChatGPT Empfehlung 6)
+              id(screensaver_timer) = std::max(0, id(screensaver_timer) - 1);
             } else {
               auto call = id(lcd_backlight).turn_off();
               call.perform();
@@ -294,6 +297,7 @@ color:
 display:
   - platform: mipi_spi
     model: M5CORE
+    # WICHTIG: Original M5Stack Belegung!
     dc_pin: GPIO35
     reset_pin:
       aw9523b: aw9523b_hub
@@ -313,14 +317,12 @@ display:
          return;
       }
 
-      // Globals cachen
       bool pwr = id(g_nad_power);
       bool mute = id(g_nad_mute);
       bool spka = id(g_nad_spk_a);
       bool spkb = id(g_nad_spk_b);
       bool tape = id(g_nad_tape);
       
-      // OPTIMIERUNG: Heap-Allocation vermeiden durch const char* Pointer
       const char* current_source = nullptr;
       if (id(active_source_safe).has_state()) {
           current_source = id(active_source_safe).state.c_str();
@@ -332,10 +334,12 @@ display:
       it.filled_rectangle(0, 0, 320, 30, id(col_black));
       it.print(10, 15, id(font_small), id(col_white), TextAlign::CENTER_LEFT, "NAD C355");
       
-      // AKKU
+      // GRAFISCHE AKKU ANZEIGE (OPTIMIERUNG 5: Typ-Korrektur)
       bool is_charging = false;
       if (id(battery_charging).has_state()) {
-          is_charging = id(battery_charging).state > 0.5; 
+          // battery_charging ist technisch ein Sensor (float), aber mit Werten 0.0/1.0
+          // Hier wandeln wir sicher in bool um.
+          is_charging = (id(battery_charging).state > 0.5); 
       }
 
       if (id(battery_voltage).has_state()) {
@@ -380,7 +384,7 @@ display:
       draw_r1_btn(10, 70, "PWR", pwr, true);
       draw_r1_btn(240, 70, "MUTE", mute, true);
 
-      // SOURCE (Mitte)
+      // SOURCE
       int sx = 90, sw = 140;
       it.filled_rectangle(sx, r1_y, sw, r1_h, id(col_btn_base));
       it.line(sx, r1_y, sx+sw, r1_y, id(col_btn_light));
@@ -459,7 +463,6 @@ display:
              int pos_x = 5 + (col * (m_w + 10));
              int pos_y = m_y + (row * (m_h + 5));
              
-             // OPTIMIERUNG: strcmp statt String-Objekt-Vergleich
              bool is_current = (current_source != nullptr && strcmp(current_source, txt) == 0);
              if (strcmp(txt, "CANCEL") == 0) is_current = false; 
 
@@ -481,7 +484,7 @@ display:
          }
       }
 
-# --- TOUCHSCREEN TREIBER & LOGIK ---
+# --- TOUCHSCREEN ---
 touchscreen:
   - platform: ft63x6
     id: touch_dev
@@ -529,8 +532,7 @@ touchscreen:
                       id(uart_bus).write_str(cmd.c_str());
                       
                       id(active_source_safe).publish_state(cmds[idx]);
-                      
-                      if (id(source_select).has_state()) id(source_select).publish_state(cmds[idx]);
+                      id(source_select).publish_state(cmds[idx]);
                    }
                    id(close_menu_delayed).execute();
                 }
@@ -673,7 +675,6 @@ binary_sensor:
   - platform: status
     name: "API Status"
 
-  # ROW 1
   - platform: touchscreen
     name: "Touch Power"
     touchscreen_id: touch_dev
@@ -707,7 +708,6 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_mute).toggle();
 
-  # ROW 2
   - platform: touchscreen
     name: "Touch Vol Down"
     touchscreen_id: touch_dev
@@ -728,7 +728,6 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(btn_vol_up).press();
 
-  # ROW 3
   - platform: touchscreen
     name: "Touch Spk A"
     touchscreen_id: touch_dev
