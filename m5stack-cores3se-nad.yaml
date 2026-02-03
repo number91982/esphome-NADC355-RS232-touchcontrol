@@ -115,7 +115,7 @@ output:
 globals:
   - id: screensaver_timer
     type: int
-    initial_value: '60'
+    initial_value: '12'
   - id: touch_locked
     type: bool
     initial_value: 'false'
@@ -140,7 +140,7 @@ globals:
     type: bool
     initial_value: 'false'
 
-# --- UART ---
+# --- UART PARSER (Clean & Robust) ---
 uart:
   id: uart_bus
   tx_pin: GPIO6 
@@ -159,27 +159,35 @@ uart:
           
           if (str.empty()) return;
 
-          // Parsing direkt hier in Globals
-          if (str.find("Main.Power=On") != std::string::npos) id(g_nad_power) = true;
-          else if (str.find("Main.Power=Off") != std::string::npos) id(g_nad_power) = false;
-          
-          else if (str.find("Main.Mute=On") != std::string::npos) id(g_nad_mute) = true;
-          else if (str.find("Main.Mute=Off") != std::string::npos) id(g_nad_mute) = false;
-          
-          else if (str.find("Main.SpeakerA=On") != std::string::npos) id(g_nad_spk_a) = true;
-          else if (str.find("Main.SpeakerA=Off") != std::string::npos) id(g_nad_spk_a) = false;
-          
-          else if (str.find("Main.SpeakerB=On") != std::string::npos) id(g_nad_spk_b) = true;
-          else if (str.find("Main.SpeakerB=Off") != std::string::npos) id(g_nad_spk_b) = false;
-          
-          else if (str.find("Main.Tape1=On") != std::string::npos) id(g_nad_tape) = true;
-          else if (str.find("Main.Tape1=Off") != std::string::npos) id(g_nad_tape) = false;
+          std::transform(str.begin(), str.end(), str.begin(), ::toupper);
 
-          else if (str.find("Main.Source=") != std::string::npos) {
+          if (str.find("MAIN.POWER=ON") != std::string::npos) id(g_nad_power) = true;
+          else if (str.find("MAIN.POWER=OFF") != std::string::npos) id(g_nad_power) = false;
+          
+          else if (str.find("MAIN.MUTE=ON") != std::string::npos) id(g_nad_mute) = true;
+          else if (str.find("MAIN.MUTE=OFF") != std::string::npos) id(g_nad_mute) = false;
+          
+          else if (str.find("MAIN.SPEAKERA=ON") != std::string::npos) id(g_nad_spk_a) = true;
+          else if (str.find("MAIN.SPEAKERA=OFF") != std::string::npos) id(g_nad_spk_a) = false;
+          
+          else if (str.find("MAIN.SPEAKERB=ON") != std::string::npos) id(g_nad_spk_b) = true;
+          else if (str.find("MAIN.SPEAKERB=OFF") != std::string::npos) id(g_nad_spk_b) = false;
+          
+          else if (str.find("MAIN.TAPE1=ON") != std::string::npos) id(g_nad_tape) = true;
+          else if (str.find("MAIN.TAPE1=OFF") != std::string::npos) id(g_nad_tape) = false;
+
+          else if (str.find("MAIN.SOURCE=") != std::string::npos) {
              std::string src = str.substr(12);
-             std::transform(src.begin(), src.end(), src.begin(), ::toupper);
-             id(active_source_safe).publish_state(src);
-             id(source_select).publish_state(src);
+             auto end_pos = src.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+             if (end_pos != std::string::npos) {
+                 src = src.substr(0, end_pos);
+             }
+             
+             if (!src.empty()) {
+                 id(active_source_safe).publish_state(src);
+                 // BEREINIGT: Kein redundanter Check mehr
+                 id(source_select).publish_state(src);
+             }
           }
 
 text_sensor:
@@ -190,7 +198,7 @@ text_sensor:
 
 # --- LOGIK ---
 interval:
-  - interval: 1s
+  - interval: 5s 
     then:
       - lambda: |-
           if (id(lcd_backlight).remote_values.is_on()) {
@@ -243,7 +251,7 @@ light:
     restore_mode: RESTORE_DEFAULT_ON
     default_transition_length: 0.2s
     on_turn_on:
-      - lambda: id(screensaver_timer) = 60;
+      - lambda: id(screensaver_timer) = 12;
 
 # --- UI DESIGN & FONTS ---
 font:
@@ -305,16 +313,33 @@ display:
          return;
       }
 
+      // Globals cachen
+      bool pwr = id(g_nad_power);
+      bool mute = id(g_nad_mute);
+      bool spka = id(g_nad_spk_a);
+      bool spkb = id(g_nad_spk_b);
+      bool tape = id(g_nad_tape);
+      
+      // OPTIMIERUNG: Heap-Allocation vermeiden durch const char* Pointer
+      const char* current_source = nullptr;
+      if (id(active_source_safe).has_state()) {
+          current_source = id(active_source_safe).state.c_str();
+      }
+
       it.fill(id(col_bg));
       
       // HEADER
       it.filled_rectangle(0, 0, 320, 30, id(col_black));
       it.print(10, 15, id(font_small), id(col_white), TextAlign::CENTER_LEFT, "NAD C355");
       
-      // GRAFISCHE AKKU ANZEIGE
+      // AKKU
+      bool is_charging = false;
+      if (id(battery_charging).has_state()) {
+          is_charging = id(battery_charging).state > 0.5; 
+      }
+
       if (id(battery_voltage).has_state()) {
         float v = id(battery_voltage).state;
-        bool is_charging = id(battery_charging).state;
         float pct = (v - 3.4) / (4.15 - 3.4);
         if (pct < 0) pct = 0; if (pct > 1) pct = 1;
 
@@ -335,19 +360,16 @@ display:
         }
       }
 
-      // --- ROW 1: POWER | SOURCE | MUTE ---
+      // --- ROW 1 ---
       int r1_y = 40;
       int r1_h = 60;
       
       auto draw_r1_btn = [&](int x, int w, const char* label, bool active, bool is_alert) {
           Color bg_col = id(col_btn_base);
           if (active) bg_col = is_alert ? id(col_alert) : id(col_active_bg);
-          
           it.filled_rectangle(x, r1_y, w, r1_h, bg_col);
-          
           Color top = active ? id(col_btn_shadow) : id(col_btn_light);
           Color bot = active ? id(col_btn_light) : id(col_btn_shadow);
-          
           it.line(x, r1_y, x+w, r1_y, top);
           it.line(x, r1_y, x, r1_y+r1_h, top);
           it.line(x, r1_y+r1_h, x+w, r1_y+r1_h, bot);
@@ -355,8 +377,8 @@ display:
           it.print(x+(w/2), r1_y+(r1_h/2), id(font_small), id(col_white), TextAlign::CENTER, label);
       };
 
-      draw_r1_btn(10, 70, "PWR", id(g_nad_power), true);
-      draw_r1_btn(240, 70, "MUTE", id(g_nad_mute), true);
+      draw_r1_btn(10, 70, "PWR", pwr, true);
+      draw_r1_btn(240, 70, "MUTE", mute, true);
 
       // SOURCE (Mitte)
       int sx = 90, sw = 140;
@@ -368,9 +390,9 @@ display:
 
       it.print(sx+(sw/2), r1_y+3, id(font_small), id(col_white), TextAlign::TOP_CENTER, "SOURCE");
       
-      if (id(g_nad_power)) {
-         if (id(active_source_safe).has_state()) {
-            it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_text_active), TextAlign::BOTTOM_CENTER, id(active_source_safe).state.c_str());
+      if (pwr) {
+         if (current_source != nullptr && current_source[0] != '\0') {
+            it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_text_active), TextAlign::BOTTOM_CENTER, current_source);
          } else {
             it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_white), TextAlign::BOTTOM_CENTER, "...");
          }
@@ -378,7 +400,7 @@ display:
          it.print(sx+(sw/2), r1_y+55, id(font_large), id(col_alert), TextAlign::BOTTOM_CENTER, "OFF");
       }
 
-      // --- ROW 2: VOLUME ---
+      // --- ROW 2 ---
       int r2_y = 110;
       int r2_h = 75;
       
@@ -398,17 +420,15 @@ display:
       it.line(v2x+v2w, r2_y, v2x+v2w, r2_y+r2_h, id(col_btn_shadow));
       it.print(v2x+(v2w/2), r2_y+(r2_h/2), id(font_huge), id(col_white), TextAlign::CENTER, "+");
 
-      // --- ROW 3: FOOTER ---
+      // --- ROW 3 ---
       int by=195, bw=96, bh=40, bg=6;
       int bx = 10;
 
       auto draw_sub_btn = [&](int x, int w, const char* label, bool active) {
           Color bg_col = active ? id(col_active_bg) : id(col_btn_base);
           it.filled_rectangle(x, by, w, bh, bg_col);
-          
           Color top = active ? id(col_btn_shadow) : id(col_btn_light);
           Color bot = active ? id(col_btn_light) : id(col_btn_shadow);
-          
           it.line(x, by, x+w, by, top);
           it.line(x, by, x, by+bh, top);
           it.line(x, by+bh, x+w, by+bh, bot);
@@ -416,11 +436,11 @@ display:
           it.print(x+(w/2), by+(bh/2), id(font_small), id(col_white), TextAlign::CENTER, label);
       };
 
-      draw_sub_btn(bx, bw, "SPK A", id(g_nad_spk_a));
+      draw_sub_btn(bx, bw, "SPK A", spka);
       bx += bw + bg;
-      draw_sub_btn(bx, bw, "SPK B", id(g_nad_spk_b));
+      draw_sub_btn(bx, bw, "SPK B", spkb);
       bx += bw + bg;
-      draw_sub_btn(bx, bw, "TAPE", id(g_nad_tape));
+      draw_sub_btn(bx, bw, "TAPE", tape);
 
       // OVERLAY MENÜ
       if (id(source_menu_active)) {
@@ -439,7 +459,8 @@ display:
              int pos_x = 5 + (col * (m_w + 10));
              int pos_y = m_y + (row * (m_h + 5));
              
-             bool is_current = (id(active_source_safe).state == txt);
+             // OPTIMIERUNG: strcmp statt String-Objekt-Vergleich
+             bool is_current = (current_source != nullptr && strcmp(current_source, txt) == 0);
              if (strcmp(txt, "CANCEL") == 0) is_current = false; 
 
              Color bg = is_current ? id(col_active_bg) : id(col_btn_base);
@@ -461,7 +482,6 @@ display:
       }
 
 # --- TOUCHSCREEN TREIBER & LOGIK ---
-# WICHTIG: Das hier hatte gefehlt!
 touchscreen:
   - platform: ft63x6
     id: touch_dev
@@ -473,9 +493,8 @@ touchscreen:
       swap_xy: false
     on_touch:
       - lambda: |-
-          id(screensaver_timer) = 60;
+          id(screensaver_timer) = 12;
           
-          // Safe Wake Up
           if (!id(lcd_backlight).remote_values.is_on()) {
              id(touch_locked) = true;
              auto call = id(lcd_backlight).turn_on();
@@ -486,7 +505,6 @@ touchscreen:
           
           if (id(touch_locked)) return;
 
-          // Overlay Menü Klick-Logik
           if (id(source_menu_active)) {
              auto t = touch; 
              
@@ -509,7 +527,10 @@ touchscreen:
                       cmd += cmds[idx];
                       cmd += "\r";
                       id(uart_bus).write_str(cmd.c_str());
+                      
                       id(active_source_safe).publish_state(cmds[idx]);
+                      
+                      if (id(source_select).has_state()) id(source_select).publish_state(cmds[idx]);
                    }
                    id(close_menu_delayed).execute();
                 }
@@ -531,7 +552,7 @@ sensor:
       id: battery_charging
     update_interval: 10s
 
-# --- SWITCHES (Lesen Globals) ---
+# --- SWITCHES ---
 switch:
   - platform: gpio
     name: "Touch Reset (AW Pin 10)"
@@ -647,13 +668,12 @@ select:
       }
       return {};
 
-# --- TOUCH ZONEN (LAYOUT 2) ---
+# --- TOUCH ZONEN ---
 binary_sensor:
   - platform: status
     name: "API Status"
 
-  # --- ROW 1 ---
-  # PWR: 0 - 85
+  # ROW 1
   - platform: touchscreen
     name: "Touch Power"
     touchscreen_id: touch_dev
@@ -664,7 +684,6 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_power).toggle();
 
-  # SOURCE: 85 - 235
   - platform: touchscreen
     name: "Touch Source"
     touchscreen_id: touch_dev
@@ -678,7 +697,6 @@ binary_sensor:
              id(source_menu_active) = true; 
           }
 
-  # MUTE: 235 - 320
   - platform: touchscreen
     name: "Touch Mute"
     touchscreen_id: touch_dev
@@ -689,8 +707,7 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_mute).toggle();
 
-  # --- ROW 2 (VOLUME) ---
-  # VOL -: 0 - 160
+  # ROW 2
   - platform: touchscreen
     name: "Touch Vol Down"
     touchscreen_id: touch_dev
@@ -701,7 +718,6 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(btn_vol_down).press();
 
-  # VOL +: 160 - 320
   - platform: touchscreen
     name: "Touch Vol Up"
     touchscreen_id: touch_dev
@@ -712,8 +728,7 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(btn_vol_up).press();
 
-  # --- ROW 3 ---
-  # 1. SPK A: 0 - 105
+  # ROW 3
   - platform: touchscreen
     name: "Touch Spk A"
     touchscreen_id: touch_dev
@@ -724,7 +739,6 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_spk_a).toggle();
 
-  # 2. SPK B: 105 - 210
   - platform: touchscreen
     name: "Touch Spk B"
     touchscreen_id: touch_dev
@@ -735,7 +749,6 @@ binary_sensor:
     on_press:
       - lambda: if(id(lcd_backlight).remote_values.is_on() && !id(touch_locked) && !id(source_menu_active)) id(nad_spk_b).toggle();
 
-  # 3. TAPE MON: 210 - 320
   - platform: touchscreen
     name: "Touch Tape Mon"
     touchscreen_id: touch_dev
